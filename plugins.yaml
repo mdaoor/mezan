@@ -1,0 +1,9 @@
+# Add a strategy: implement the ABC from mizan.plugins.base, add one line, restart api/worker.
+# Shipped strategies are registered automatically; entries here add or override.
+adapters: []
+#  - module: mizan_contrib.my_engine:MyEngineAdapter
+normalizers: []
+metrics: []
+segmenters: []
+exporters: []
+telemetry: []

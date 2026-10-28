@@ -1,0 +1,21 @@
+# Endpoint presets offered by the "Add endpoint" drawer (Appendix B).
+- display_name: "Jais-ASR (vLLM GPU0)"
+  engine_kind: vllm_openai
+  model_id: "IFM/Jais-ASR"
+  base_url: "http://vllm-gpu0:8000"
+  config: {max_concurrency: 48}
+- display_name: "Cohere Transcribe Arabic (vLLM GPU1)"
+  engine_kind: vllm_openai
+  model_id: "CohereLabs/cohere-transcribe-arabic-07-2026"
+  base_url: "http://vllm-gpu1:8001"
+  config: {max_concurrency: 64}
+- display_name: "Qwen3-ASR (vLLM)"
+  engine_kind: vllm_openai
+  model_id: "Qwen/Qwen3-ASR-1.7B"
+  base_url: "http://vllm-gpu0:8000"
+  config: {max_concurrency: 48}
+- display_name: "Whisper large-v3 (faster-whisper)"
+  engine_kind: faster_whisper_http
+  model_id: "large-v3"
+  base_url: "http://faster-whisper:9000"
+  config: {max_concurrency: 8}

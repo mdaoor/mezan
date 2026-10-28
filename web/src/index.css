@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { --bg:#f6f7f9; --panel:#ffffff; --fg:#1b1f24; --mut:#667085; --line:#e1e4ea; --accent:#0b6b4f; --accent-fg:#fff; --warn:#b54708; --bad:#b42318; --latin:#2457c5; }
+[data-theme='dark'] { --bg:#0f1317; --panel:#171c22; --fg:#e8ebf0; --mut:#98a2b3; --line:#2a323b; --accent:#2fbf8f; --accent-fg:#06281d; --warn:#f79009; --bad:#f97066; --latin:#7aa2ff; }
+html, body, #root { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: 'IBM Plex Sans', system-ui, sans-serif; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.btn { border: 1px solid var(--line); background: var(--panel); border-radius: 8px; padding: 6px 12px; font-size: 14px; cursor: pointer; }
+.btn:hover { border-color: var(--accent); }
+.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn-primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+.btn-danger { color: var(--bad); }
+.input { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 8px; padding: 6px 10px; font-size: 14px; }
+.mut { color: var(--mut); }
+.chip { display:inline-block; border:1px solid var(--line); border-radius: 999px; padding: 1px 10px; font-size: 12px; }
+.chip.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+table.t { width:100%; border-collapse: collapse; font-size: 14px; }
+table.t th, table.t td { border-bottom: 1px solid var(--line); padding: 6px 10px; text-align: start; vertical-align: top; }
+table.t th { color: var(--mut); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+.bidi { unicode-bidi: plaintext; }
+.ar-editor { font-family: 'Noto Naskh Arabic', 'IBM Plex Sans Arabic', system-ui, sans-serif; font-size: 20px; line-height: 2; unicode-bidi: plaintext; white-space: pre-wrap; word-break: break-word; padding: 12px; }
+.latin { color: var(--latin); }
+.changed { text-decoration: underline; text-decoration-style: dotted; text-decoration-color: var(--warn); }
+.diff-ins { background: color-mix(in srgb, var(--accent) 25%, transparent); text-decoration: underline; }
+.diff-del { background: color-mix(in srgb, var(--bad) 25%, transparent); text-decoration: line-through; }
+.diff-sub { background: color-mix(in srgb, var(--warn) 25%, transparent); border-bottom: 2px solid var(--warn); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

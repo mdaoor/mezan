@@ -1,0 +1,30 @@
+# docker compose up  ->  http://localhost:8080  (admin@mizan.local / $MIZAN_ADMIN_PASSWORD)
+x-mizan: &mizan
+  build: .
+  environment: &env
+    MIZAN_DATABASE_URL: postgresql+asyncpg://mizan:mizan@postgres:5432/mizan
+    MIZAN_REDIS_URL: redis://redis:6379/0
+    MIZAN_SECRET: ${MIZAN_SECRET:-change-me-to-a-long-random-string}
+    MIZAN_ADMIN_PASSWORD: ${MIZAN_ADMIN_PASSWORD:-admin}
+    MIZAN_DATA_DIR: /data
+    MIZAN_AUTO_CREATE: "false"          # schema comes from `mizan migrate`
+  volumes: ["mizan-data:/data"]
+  depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_started}}
+
+services:
+  api:
+    <<: *mizan
+    command: ["sh", "-c", "mizan migrate && mizan serve --port 8080"]
+    environment: {<<: *env, MIZAN_EMBEDDED_WORKER: "false"}
+    ports: ["8080:8080"]
+  worker:                                  # scale: docker compose up --scale worker=3
+    <<: *mizan
+    command: ["mizan", "worker", "--queues", "ingest,infer,score,load,report", "--slots", "6"]
+  postgres:
+    image: postgres:16
+    environment: {POSTGRES_USER: mizan, POSTGRES_PASSWORD: mizan, POSTGRES_DB: mizan}
+    volumes: ["pg-data:/var/lib/postgresql/data"]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U mizan"], interval: 3s, retries: 20}
+  redis:
+    image: redis:7
+volumes: {mizan-data: {}, pg-data: {}}

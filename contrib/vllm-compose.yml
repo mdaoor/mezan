@@ -1,0 +1,29 @@
+# Two vLLM servers, one per H200. Registered in Mizan as endpoints by URL; Mizan never loads weights.
+#   docker compose -f docker-compose.yml -f contrib/vllm-compose.yml up -d
+# NOTE: Jais-ASR ships a vLLM plugin (see https://huggingface.co/IFM/Jais-ASR); install it in the image per the
+# model card before starting. Check each model card for the exact serve flags of your vLLM version.
+services:
+  vllm-gpu0:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "IFM/Jais-ASR", "--port", "8000", "--max-num-seqs", "64", "--trust-remote-code"]
+    ipc: host
+    environment: {HF_TOKEN: "${HF_TOKEN:-}"}
+    volumes: ["hf-cache:/root/.cache/huggingface"]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]}}}
+  vllm-gpu1:
+    image: vllm/vllm-openai:latest
+    command: ["--model", "CohereLabs/cohere-transcribe-arabic-07-2026", "--port", "8001", "--max-num-seqs", "64"]
+    ipc: host
+    environment: {HF_TOKEN: "${HF_TOKEN:-}"}   # gated model: accept the licence on HF first
+    volumes: ["hf-cache:/root/.cache/huggingface"]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ["1"], capabilities: [gpu]}]}}}
+  faster-whisper:
+    build: {context: ., dockerfile: contrib/faster-whisper.Dockerfile}
+    environment: {WHISPER_MODEL: large-v3}
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, device_ids: ["0"], capabilities: [gpu]}]}}}
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:latest
+    ports: ["9400:9400"]
+    deploy: {resources: {reservations: {devices: [{driver: nvidia, count: all, capabilities: [gpu]}]}}}
+volumes:
+  hf-cache:
