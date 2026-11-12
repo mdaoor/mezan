@@ -1,0 +1,163 @@
+<h2>7. Robustness, slices and failure-mode testing</h2>
+<h3>7.1 Slice analysis</h3>
+<p>An overall WER averages over very different conditions. Pre-declare the slices that matter and apply the same non-inferiority test to each:</p>
+<table><tr><th>Slice</th><th>Why it can regress independently</th><th>Mizan stratum</th></tr>
+<tr><td>Language mix: <code>ar</code> / <code>en</code> / <code>mixed</code></td><td>Code-switch handling differs sharply between models</td><td><code>lang_mix</code> (auto)</td></tr>
+<tr><td>Duration bucket: &lt;5 s, 5&ndash;15 s, 15&ndash;30 s, &gt;30 s</td><td>Short segments lack context; long ones stress chunking and context windows</td><td><code>duration_bucket</code> (auto)</td></tr>
+<tr><td>Dialect (Gulf, Levantine, Egyptian, Maghrebi, MSA&hellip;)</td><td>Training coverage differs per dialect</td><td><code>dialect</code> (annotator)</td></tr>
+<tr><td>Noise / SNR / channel (phone, far-field)</td><td>Robustness to degradation</td><td><code>snr_bucket</code> (optional)</td></tr>
+<tr><td>Domain vocabulary (finance, medical, product names)</td><td>Rare-word accuracy</td><td><code>domain</code> (annotator)</td></tr>
+<tr><td>Speaker group (gender, age, accent)</td><td>Fairness: aggregate wins can hide group-level losses</td><td><code>speaker</code></td></tr>
+<tr><td>Non-speech (silence, music, hold, DTMF)</td><td>Hallucination</td><td>flags <code>no_speech</code>, <code>music</code></td></tr></table>
+<p>Report the <b>count</b> of segments and words in each slice and flag slices below a minimum size as "indicative only". A fairness-relevant slice that is too small to test should trigger more data collection, not a shrug.</p>
+
+<h3>7.2 Hallucination and non-speech tests</h3>
+<p>A hallucination audit of Whisper found roughly 1% of sampled transcriptions contained hallucinated content, with 38% of those containing explicit harms such as invented violence or false authority; silences at the start/end of recordings and long non-vocal stretches appeared to trigger it, and the other commercial systems audited did not show the effect. <span class="tag">verified</span> A separate study reported near-100% hallucination for Whisper-large-v3 on non-speech audio against 13.52% for a Conformer-CTC model <span class="tag">preprint, secondary summary</span>. The magnitude is test-dependent; the direction is not. Therefore:</p>
+<ul>
+<li>Include a <b>non-speech battery</b> in every evaluation: pure silence (various lengths), room tone, music, hold tones, DTMF, breathing/cough, TV in background, leading/trailing silence around real speech.</li>
+<li>Metric: <b>hallucination rate</b> = share of non-speech segments where the output has more than a trivial number of tokens, with a Wilson interval; plus the <b>content</b> of hallucinations (reviewed manually: a loop of "thank you" is benign, an invented clinical statement is not).</li>
+<li>Models with an explicit no-speech signal (Jais-ASR's model card states that it says so instead of inventing text, and the Mizan adapter maps its sentinel token) are easier to gate; but verify the claim on <i>your</i> non-speech battery. <span class="tag">vendor-reported</span></li>
+<li>Mitigations to evaluate as <i>configuration</i> changes, each re-tested (§8): VAD pre-filtering before ASR; disabling conditioning on previous text (community reports and one preprint show it can cause runaway error propagation in long-form decoding); a volume/energy gate for near-silence; log-probability and compression-ratio filters; repetition controls; phrase blocklists as a last resort. <span class="tag">community</span> None of these is free: VAD can clip quiet speech (deletions) and disabling conditioning loses context.</li></ul>
+
+<h3>7.3 Other failure-mode probes</h3>
+<ul>
+<li><b>Repetition loops</b>: detect with an n-gram repeat ratio on hypotheses; track the insertion rate, and the maximum per-segment WER.</li>
+<li><b>Language-ID failures</b>: Arabic audio transcribed or translated into English; English phrases turned into Arabic nonsense. Detect with script-ratio checks between reference and hypothesis.</li>
+<li><b>Truncation and dropped tails</b>: compare hypothesis length to reference length; track deletion rate and "ends early" cases at segment boundaries and for long inputs.</li>
+<li><b>Numbers, names, acronyms</b>: dedicated token-class error rates (§5.5).</li>
+<li><b>Perturbation tests</b>: speed &plusmn;10%, additive noise at fixed SNR, codec re-encoding (8 kHz telephone), volume changes. Large deltas reveal fragile systems; report the delta, not just the absolute number.</li>
+<li><b>Determinism</b>: run the same input several times; at temperature 0 a stable engine should return identical text. Report the fraction of segments whose output changes between runs.</li></ul>
+
+<h2>8. Inference engines: what changes when you change the runtime</h2>
+<p>An engine is not a neutral container. It determines which decoding features exist, how long audio is chunked, what precision kernels run, how requests are batched and therefore both speed and, sometimes, the text produced. The only safe assumption is: <b>if you change the engine, re-run the accuracy evaluation.</b></p>
+
+<h3>8.1 Landscape</h3>
+<table><tr><th>Engine / runtime</th><th>What is established</th><th>Implications for evaluation</th></tr>
+<tr><td><b>vLLM</b> (OpenAI-compatible server)</td>
+<td>Exposes a Transcriptions API compatible with OpenAI's (the OpenAI Python client works against it); audio extras installed with <code>vllm[audio]</code>; accepts common formats (FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, WEBM); default upload limit 25 MB via <code>VLLM_MAX_AUDIO_CLIP_FILESIZE_MB</code>; Whisper is the reference encoder-decoder implementation; other models integrate through a <code>SupportsTranscription</code> interface. <span class="tag">verified (docs)</span> Its PagedAttention / continuous batching design raised LLM serving throughput 2&ndash;4&times; at similar latency versus FasterTransformer and Orca in the original paper. <span class="tag">verified (paper; LLM workloads)</span></td>
+<td>Excellent for many concurrent requests on one GPU; throughput depends on <code>--max-num-seqs</code> and memory; model support is per version &mdash; check the supported-models page for your exact release. The 2&ndash;4&times; figure is for LLM text generation: do <b>not</b> assume it for audio encoder-decoder workloads; measure.</td></tr>
+<tr><td><b>faster-whisper</b> (CTranslate2)</td>
+<td>Reimplementation of Whisper on CTranslate2. Its README reports, for 13 minutes of audio on an RTX 3070 Ti, 2m23s for openai/whisper (fp16, beam 5) vs 1m03s for faster-whisper sequential and 17 s with batch size 8 (batched mode up to 10&ndash;12&times; faster than OpenAI's implementation and 3&ndash;4&times; faster than sequential). Batched mode transcribes VAD-defined chunks and <b>ignores some options</b> (e.g. compression and no-speech thresholds, <code>condition_on_previous_text</code>). <span class="tag">vendor-reported</span></td>
+<td>Strong single-GPU Whisper throughput. Because batched mode changes chunking and drops options, its accuracy is a <i>different system</i> from sequential mode: evaluate the exact mode you will deploy. Self-reported benchmarks used consumer hardware; re-measure on yours.</td></tr>
+<tr><td><b>Hugging Face Transformers</b> pipelines</td><td>Reference implementations for many models, including those whose serving plugins lag (custom-code ASR models). <span class="tag">practice</span></td>
+<td>Good as an accuracy <i>oracle</i> for equivalence testing; rarely the best throughput option.</td></tr>
+<tr><td><b>whisper.cpp / on-device runtimes</b></td><td>C/C++ ports and quantized formats for CPU/edge. <span class="tag">practice</span></td>
+<td>Quantization effects are larger on hard slices; evaluate per slice. Not a candidate for GPU-server throughput.</td></tr>
+<tr><td><b>NVIDIA stacks</b> (NeMo, Riva, TensorRT-LLM, Triton)</td><td>Vendor toolchains for CTC/TDT/Conformer models and optimized deployment. The Open ASR Leaderboard reports CTC and TDT decoders give superior RTFx while Conformer encoder + transformer decoder gave the best average WER. <span class="tag">verified (leaderboard paper)</span></td>
+<td>If throughput dominates your decision, evaluate this family; if Arabic/English code-switching accuracy dominates, check what public Arabic leaderboards and <i>your</i> gold set say.</td></tr>
+<tr><td><b>Hosted APIs</b> (cloud ASR)</td><td>No infrastructure; data leaves your environment. <span class="tag">practice</span></td>
+<td>Flag as <code>external</code>; apply privacy/legal gates first (§11); versions can change without notice, so pin dates and re-run evaluation on a schedule.</td></tr></table>
+
+<h3>8.2 Decoding and pipeline parameters that change accuracy</h3>
+<table><tr><th>Parameter</th><th>Effect</th><th>Evaluate</th></tr>
+<tr><td>Beam size / sampling temperature, temperature fallback</td><td>Quality vs speed; fallback can rescue or randomize</td><td>WER, determinism, latency tail</td></tr>
+<tr><td>Language forcing / language hint</td><td>Prevents mis-ID; for code-switching a forced <code>ar</code> may suppress English segments or the reverse</td><td><code>mixed</code> and <code>en</code> slices, English-term preservation</td></tr>
+<tr><td>VAD pre-segmentation (threshold, min-silence)</td><td>Removes silence hallucination; can clip soft speech</td><td>Hallucination rate <b>and</b> deletion rate</td></tr>
+<tr><td><code>condition_on_previous_text</code></td><td>Context gain vs error propagation in long-form</td><td>Long-form track WER, loops</td></tr>
+<tr><td>Repetition penalty / no-repeat n-gram</td><td>Suppresses loops; can block legitimate repetition (numbers, "نعم نعم")</td><td>Insertion rate vs deletion rate</td></tr>
+<tr><td>Prompting / hotwords / lexicon biasing</td><td>Improves rare terms; can bias or leak text into outputs</td><td>Entity-token error rate; non-speech battery</td></tr>
+<tr><td>Chunk length and overlap, stitching rule</td><td>Boundary errors and duplicate words at joins</td><td>Long-form file-level WER; duplicates at boundaries</td></tr>
+<tr><td>Precision (bf16/fp16/int8/int4)</td><td>Small average shift, larger on hard slices</td><td>Per-slice non-inferiority</td></tr>
+<tr><td>Max batch / concurrent sequences</td><td>Throughput/latency; occasionally batch-dependent numerics</td><td>Load grid; spot-check accuracy at the chosen setting</td></tr></table>
+
+<h3>8.3 Same weights on a different engine: the equivalence test</h3>
+<ol>
+<li>Pick the <b>reference engine</b> (the most faithful implementation, often the model author's) and the candidate engine; load identical weights and dtype where possible.</li>
+<li>Run both on the full gold set <i>and</i> the non-speech battery with identical decoding settings.</li>
+<li>Report: (a) paired WER difference with the 90% interval vs &plusmn;&delta;; (b) <b>output agreement</b>: fraction of segments with identical normalized text, and agreement WER between the two engines' outputs (Mizan's <i>agreement mode</i> &mdash; labelled as disagreement, never as accuracy); (c) per-slice differences; (d) the top-N most-divergent segments for manual review (Mizan's disagreement explorer).</li>
+<li>Expect <b>not</b> bit-identical text: different kernels, fused ops and batch compositions produce tiny numerical differences that occasionally flip a token. A small, unbiased, slice-uniform disagreement is acceptable; a systematic shift on one slice (e.g. numbers, English words, long segments) is a configuration or implementation difference to chase.</li>
+<li>If the engines <i>should</i> differ (different chunking), the comparison is no longer an equivalence test; treat the whole pipeline as the candidate (§2).</li></ol>
+
+<h3>8.4 Long-form and chunking</h3>
+<p>Segment-level scoring assumes someone already cut the audio. In production, the engine often does the cutting (30-second windows, VAD chunks, overlap, stitching) and that is where duplicates, dropped boundaries and context errors arise. The Open ASR Leaderboard paper itself extended its scope to long-form evaluation for this reason. <span class="tag">verified (title/scope)</span> Maintain a small set of full recordings with complete references and evaluate the <i>file-level</i> WER, boundary duplicates and wall-clock time per candidate pipeline, in addition to the segment-level gold-set run.</p>
+
+<h3>8.5 Engine-level checklist</h3>
+<ul>
+<li>Pin versions: engine, model revision/commit, tokenizer, CUDA/driver, plugin versions. Record them in the run's resolved configuration (Mizan does).</li>
+<li>Run a <b>smoke test on every run start</b> (health + one segment) so adapter or API drift fails fast.</li>
+<li>Check <b>payload and length limits</b> (e.g. 25 MB default in vLLM; maximum segment seconds recommended by the model) against your real inputs.</li>
+<li>Check <b>error semantics</b>: which failures are retryable (timeouts, 5xx) vs permanent (400)? Count them &mdash; an engine that returns empty strings instead of errors silently degrades accuracy.</li>
+<li>Check <b>resource behaviour</b>: GPU memory footprint (weights, KV/cache, batch), warm-up/compile time, behaviour at OOM.</li></ul>
+
+<h2>9. Non-functional evaluation: latency, throughput, load</h2>
+<h3>9.1 Definitions</h3>
+<div class="eq">latency (per request)   = wall time from send to final transcript, in ms
+RTFx (inverse real-time factor) = total audio duration / total processing time      (higher is faster)
+    sequential-equivalent RTFx  = Σ audio_s / Σ per-request wall_s
+    observed (parallel) RTFx    = Σ audio_s completed in a step / step duration
+throughput              = completed requests per second (and audio-seconds per second)
+error rate              = failed requests / total requests (by class: timeout, 5xx, 4xx, malformed)
+cost per audio hour     = GPU $/hour ÷ (sustained RTFx × target utilisation)</div>
+<p>RTFx as used by the Open ASR Leaderboard is the audio duration divided by transcription time. <span class="tag">verified</span> Always say whether a quoted RTFx is single-stream or at a given concurrency, which hardware, which batch size, and which audio length mix: the same engine can differ by an order of magnitude across these.</p>
+
+<h3>9.2 Throughput versus latency: the saturation knee</h3>
+<p>For a closed-loop test with N clients each keeping one request in flight, Little's law gives N = X &middot; W (in-flight = throughput &times; mean latency). Below the engine's capacity, throughput rises with N and latency stays near the unloaded service time; once capacity is reached, throughput flattens and additional concurrency only adds queueing delay:</p>
+<figure><img src="fig/knee.png" alt="saturation knee"><figcaption>Figure 2. Idealised closed-loop behaviour (service time 0.40 s, capacity 24 req/s). Real engines show a rounded knee and tail latency rising earlier than the mean. Model for intuition only.</figcaption></figure>
+<ul>
+<li><b>Find the knee</b>, not the peak. Operate at the highest concurrency where p95/p99 still meet the SLO and the error rate is within budget (Mizan flags saturation at the first step where p95 grows &gt; 2&times; the previous step or errors exceed 1%).</li>
+<li><b>Capacity planning</b>: servers needed = peak audio-seconds per second &divide; (sustained RTFx at SLO &times; utilisation target). Example (illustrative inputs): 10 hours of audio arriving per hour at peak is 10 audio-seconds per second; at a sustained 150&times; RTFx and a 60% utilisation ceiling, 10 &divide; (150 &times; 0.6) = 0.11 &rarr; one server suffices with large headroom; the binding constraint becomes p99 latency and failover, not throughput.</li>
+<li><b>Mix matters</b>: use the real distribution of segment lengths (Mizan: length-bucket weights). Short-segment traffic stresses per-request overhead; long segments stress the encoder and memory.</li></ul>
+
+<h3>9.3 Closed-loop versus open-loop load, and coordinated omission</h3>
+<p>Gil Tene named <b>coordinated omission</b>: if a load generator waits for each response before sending the next request, a stall also pauses the sending, so the requests that <i>would have been sent during the stall</i> never exist and their (long) latencies are never recorded. The recorded distribution then looks far healthier than what real, independently arriving users experience. Recommended remedies are open-loop generators with a fixed arrival schedule (measuring latency from the <i>intended</i> send time), or correcting recorded values (HdrHistogram's correction mode), and reporting the full percentile spectrum rather than averages (percentiles cannot be averaged across runs or machines). <span class="tag">verified (secondary write-ups of the original posts)</span></p>
+<figure><img src="fig/co.png" alt="coordinated omission"><figcaption>Figure 3. Simulation of one 2-second stall at t = 10 s. Service time 20 ms; open-loop schedule 20 requests/s (40% utilisation) versus a single closed-loop client. Closed loop: 1,401 samples, p50 = 20 ms, p99 = 20 ms, max 2,020 ms. Open loop: 600 samples, p50 = 20 ms, <b>p99 = 1,840 ms</b>, p99.9 = 2,002 ms.</figcaption></figure>
+<div class="box warn"><b class="t">What this means for the numbers you collect</b>
+<ul><li>A <b>closed-loop concurrency ramp</b> (N clients, each in a loop) answers "how does the system behave with N concurrent callers and where does it saturate?". That is the right model for a worker pool that submits jobs as fast as results return (batch transcription).</li>
+<li>For services with <b>independent arrivals</b> (call-centre streams, user uploads), p99 under a closed-loop generator can be materially optimistic near and beyond the knee. Use an open-loop (arrival-rate) test, or at least treat closed-loop p99 as a lower bound.</li>
+<li><i>Mizan's current load generator is closed-loop</i> (see §13). It is the correct tool for the saturation/RTFx curve; its tail percentiles should be read with this caveat.</li></ul></div>
+
+<h3>9.4 Load-test hygiene</h3>
+<ul>
+<li><b>Warm up</b> (model load, kernel autotune/compile, cache fill) and <b>discard</b> the warm-up; test steady state for long enough to include periodic effects (GC, thermal throttling, batch-scheduler cycles).</li>
+<li><b>Sample size for tails</b>: a p99 estimate needs hundreds to thousands of samples per step (rule of thumb: at least ~10&times; 1/(1&minus;q) &mdash; 1,000 samples for p99, 10,000 for p99.9). Short steps at low concurrency produce meaningless p99.</li>
+<li><b>Same hardware, data and generator for every candidate</b>; randomize or interleave run order; repeat at least three times and report the spread. Shared GPUs or noisy neighbours invalidate comparisons.</li>
+<li><b>Guardrails</b>: per-request timeout, abort a step above an error ceiling (Mizan: 20%), cap at the endpoint's declared maximum concurrency, schedule heavy tests outside production windows.</li>
+<li><b>Record telemetry</b> (GPU utilisation, memory, temperature, power at 1 Hz) and join it to steps: saturation with 40% GPU utilisation means the bottleneck is elsewhere (CPU pre-processing, network, scheduler).</li>
+<li><b>Break out error classes</b> (timeouts, 5xx, 4xx). A "fast" engine that sheds load with errors has not saturated gracefully.</li>
+<li><b>Cold start and failover</b>: measure time from container start to first successful transcript; this bounds autoscaling responsiveness.</li>
+<li><b>Re-check accuracy at the load you chose</b>: some stacks change results under different batch compositions; spot-check a gold subset while loaded.</li></ul>
+
+<h2>10. The swap protocol: from candidate to production</h2>
+<svg viewBox="0 0 700 150" width="100%" role="img" aria-label="protocol flow" style="margin:6pt 0 8pt">
+<defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#0b6b4f"/></marker></defs>
+<g font-family="DejaVu Sans" font-size="9.5" fill="#1b1f24" stroke="#0b6b4f" stroke-width="1.2">
+<rect x="4" y="10" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="66" y="30" text-anchor="middle" stroke="none" font-weight="700">1 Define</text><text x="66" y="44" text-anchor="middle" stroke="none">decision, δ, SLO,</text><text x="66" y="55" text-anchor="middle" stroke="none">hard constraints</text>
+<rect x="144" y="10" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="206" y="30" text-anchor="middle" stroke="none" font-weight="700">2 Freeze data</text><text x="206" y="44" text-anchor="middle" stroke="none">gold v1 + holdout,</text><text x="206" y="55" text-anchor="middle" stroke="none">noise floor (IAA)</text>
+<rect x="284" y="10" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="346" y="30" text-anchor="middle" stroke="none" font-weight="700">3 Baseline</text><text x="346" y="44" text-anchor="middle" stroke="none">incumbent with CIs,</text><text x="346" y="55" text-anchor="middle" stroke="none">load curve</text>
+<rect x="424" y="10" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="486" y="30" text-anchor="middle" stroke="none" font-weight="700">4 Candidates</text><text x="486" y="44" text-anchor="middle" stroke="none">model × engine ×</text><text x="486" y="55" text-anchor="middle" stroke="none">decode config grid</text>
+<rect x="564" y="10" width="132" height="52" rx="6" fill="#f3f6f5"/><text x="630" y="30" text-anchor="middle" stroke="none" font-weight="700">5 Gates</text><text x="630" y="44" text-anchor="middle" stroke="none">accuracy, safety,</text><text x="630" y="55" text-anchor="middle" stroke="none">slices, constraints</text>
+<rect x="4" y="88" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="66" y="108" text-anchor="middle" stroke="none" font-weight="700">6 Load</text><text x="66" y="122" text-anchor="middle" stroke="none">SLO capacity, knee,</text><text x="66" y="133" text-anchor="middle" stroke="none">errors, cost</text>
+<rect x="144" y="88" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="206" y="108" text-anchor="middle" stroke="none" font-weight="700">7 Score</text><text x="206" y="122" text-anchor="middle" stroke="none">weighted matrix +</text><text x="206" y="133" text-anchor="middle" stroke="none">sensitivity</text>
+<rect x="284" y="88" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="346" y="108" text-anchor="middle" stroke="none" font-weight="700">8 Shadow</text><text x="346" y="122" text-anchor="middle" stroke="none">live traffic, agreement</text><text x="346" y="133" text-anchor="middle" stroke="none">+ sampled review</text>
+<rect x="424" y="88" width="124" height="52" rx="6" fill="#f3f6f5"/><text x="486" y="108" text-anchor="middle" stroke="none" font-weight="700">9 Canary</text><text x="486" y="122" text-anchor="middle" stroke="none">1% → 10% → 100%</text><text x="486" y="133" text-anchor="middle" stroke="none">rollback triggers</text>
+<rect x="564" y="88" width="132" height="52" rx="6" fill="#f3f6f5"/><text x="630" y="108" text-anchor="middle" stroke="none" font-weight="700">10 Record</text><text x="630" y="122" text-anchor="middle" stroke="none">decision memo,</text><text x="630" y="133" text-anchor="middle" stroke="none">resolved configs</text>
+</g>
+<g stroke="#0b6b4f" stroke-width="1.4" marker-end="url(#a)" fill="none">
+<path d="M128,36 L142,36"/><path d="M268,36 L282,36"/><path d="M408,36 L422,36"/><path d="M548,36 L562,36"/>
+<path d="M630,62 L630,76 L66,76 L66,86"/><path d="M128,114 L142,114"/><path d="M268,114 L282,114"/><path d="M408,114 L422,114"/><path d="M548,114 L562,114"/></g></svg>
+
+<h3>10.1 Step by step</h3>
+<ol>
+<li><b>Define.</b> Write the decision ("replace A with B for Arabic+English call audio"), the margin &delta;, critical slices, SLOs (p95/p99 at target concurrency, error budget), and hard constraints (data residency, licence, hardware, maximum cost per audio hour). Agree them <i>before</i> running anything.</li>
+<li><b>Freeze data.</b> Gold v1 (stratified, reviewed, with non-speech and a long-form track), a locked test partition, the human noise floor from blind double annotation, and the normalizer version.</li>
+<li><b>Baseline the incumbent</b> with the exact production configuration: accuracy with intervals, slice table, hallucination battery, and its load curve. Without a baseline measured under the same harness, "better" has no meaning.</li>
+<li><b>Define the candidate grid.</b> For each candidate model: engine(s) and decoding configuration(s) you would really deploy; add the incumbent's pre/post-processing as a control. Keep the grid small and pre-declared to avoid selection bias.</li>
+<li><b>Accuracy gates</b> on the locked test set: non-inferiority overall and per critical slice; safety bounds (hallucination, deletion, insertion/loops); no regression on number/entity tokens. Inspect the top disagreement segments manually.</li>
+<li><b>Load.</b> Concurrency ramp on the same adapter and data; find the knee; verify error classes; compute sustained RTFx and cost per audio hour; repeat &ge; 3 times; use open-loop tests where independent arrivals matter (§9.3). Re-check accuracy on a gold subset at the chosen concurrency.</li>
+<li><b>Score and stress the decision.</b> Apply gates, rank survivors with the weighted matrix (§11), then perturb weights to see whether the ranking is stable.</li>
+<li><b>Shadow.</b> Send a copy of live traffic to the candidate without affecting users. You do not have gold labels, so use (a) agreement with the incumbent per slice (disagreement should look like the gold-set difference), (b) a stratified sample reviewed by humans, (c) operational metrics (latency, errors, empty-output rate, length ratio vs incumbent), (d) drift of input distribution vs gold-set strata.</li>
+<li><b>Canary.</b> Gradual ramp (e.g. 1% &rarr; 10% &rarr; 50% &rarr; 100%) with <b>pre-agreed rollback triggers</b>: error rate above X, p99 above Y, empty-output rate above Z, human-sampled WER above W, any hallucination incident of a defined severity. Keep the incumbent warm until the end of the observation window.</li>
+<li><b>Record.</b> Store the decision memo (§11.3), the resolved configuration of every run (adapter version, model revision, normalizer rules, metric versions, options), the gold-set version and seeds. Schedule re-evaluation: on any engine/model/driver upgrade and at least quarterly.</li></ol>
+
+<h3>10.2 Illustrative acceptance criteria (set your own)</h3>
+<table><tr><th>Criterion</th><th>Example threshold</th><th>Test</th></tr>
+<tr><td>Overall accuracy</td><td>upper95%(WER<sub>C</sub> &minus; WER<sub>I</sub>) &lt; 0.5 pp</td><td>Paired cluster bootstrap on locked test</td></tr>
+<tr><td>Critical slices</td><td>same bound &lt; 1.0 pp for <code>mixed</code>, dialect X, &lt;5 s, noisy</td><td>Per-slice paired bootstrap, with <code>n</code> shown</td></tr>
+<tr><td>Dropped speech</td><td>deletion rate not worse by &gt; 0.3 pp</td><td>Paired bootstrap on D/N</td></tr>
+<tr><td>Hallucination</td><td>upper Wilson bound on non-speech battery &le; 2%</td><td>&ge; 200 non-speech segments</td></tr>
+<tr><td>Loops</td><td>no segment with insertion rate &gt; 100%; insertion rate not worse</td><td>Max per-segment WER, loop detector</td></tr>
+<tr><td>Latency</td><td>p95 &lt; 2 s and p99 &lt; 4 s at target concurrency, 3 repeats</td><td>Closed- and open-loop tests</td></tr>
+<tr><td>Errors</td><td>&lt; 0.5% at target concurrency; no timeouts</td><td>Load test error classes</td></tr>
+<tr><td>Capacity</td><td>Sustained RTFx covers 2&times; peak with 40% headroom</td><td>Capacity formula (§9.2)</td></tr>
+<tr><td>Constraints</td><td>No external data egress; licence permits intended use; fits the GPUs</td><td>Gate review</td></tr></table>
+<p class="small">All thresholds above are placeholders to illustrate the form of a criterion, not recommendations.</p>

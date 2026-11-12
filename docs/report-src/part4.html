@@ -1,0 +1,176 @@
+<h2>11. Decision framework and the technical report template</h2>
+<h3>11.1 Gate first, score second</h3>
+<p>Mixing hard constraints into a weighted sum lets a strong score on one axis buy back a disqualifying failure on another. Separate them:</p>
+<table><tr><th>Stage</th><th>Question</th><th>Outcome</th></tr>
+<tr><td><b>Hard gates</b> (pass/fail)</td><td>Data residency / <code>external</code> flag acceptable? Licence permits the use (including gated-access terms)? Fits the available GPUs/memory? Meets SLO at target concurrency? Safety bounds (hallucination, deletion, loops) met? Non-inferiority on critical slices met?</td><td>Candidates that fail any gate are <b>eliminated</b> and listed with the reason</td></tr>
+<tr><td><b>Scoring</b> (survivors only)</td><td>Given the survivors, which best balances accuracy, code-switch quality, throughput/cost and robustness?</td><td>Ranked list + sensitivity analysis</td></tr>
+<tr><td><b>Tie-breakers</b></td><td>Operational simplicity, ecosystem/support, upgrade path, team familiarity, vendor risk</td><td>Written rationale</td></tr></table>
+
+<h3>11.2 The weighted matrix (as implemented in Mizan <code>decision_v1</code>)</h3>
+<table><tr><th>Component</th><th>Default weight</th><th>Definition (each in [0, 1], higher is better)</th></tr>
+<tr><td>Accuracy</td><td>50%</td><td>1 &minus; WER (evaluation runs against gold only; agreement-mode results are never called accuracy)</td></tr>
+<tr><td>Code-switch</td><td>20%</td><td>mean of (1 &minus; WER-AR), (1 &minus; WER-EN), English-term preservation</td></tr>
+<tr><td>Throughput</td><td>20%</td><td>best error-free (&le; 1% errors) RTFx across load steps, relative to the best candidate</td></tr>
+<tr><td>Robustness</td><td>10%</td><td>mean of (1 &minus; hallucination rate), (1 &minus; insertion rate), (1 &minus; failed-segment share)</td></tr></table>
+<p>Components with missing evidence are dropped and the remaining weights renormalised, and the report says so. Treat the matrix as a <b>communication device</b>, not an oracle:</p>
+<ul>
+<li>Weights are <b>value judgments</b>. Show how the ranking changes as each weight varies (e.g. &plusmn;50% around the defaults, and the corner cases "accuracy only" and "throughput only"). A ranking that flips under mild perturbation is a tie; say so and decide on the tie-breakers.</li>
+<li>Normalising throughput <i>relative to the best candidate</i> makes the score depend on who else is in the comparison; adding a very fast candidate lowers everyone else's throughput score. Report the absolute RTFx and cost per audio hour next to the score.</li>
+<li>Linear scores treat a 1-point WER gain as equal at every level; if the use case has a threshold (e.g. "usable below 15% WER"), model it as a gate or a utility curve instead.</li></ul>
+
+<h3>11.3 Technical report template (fill with your results)</h3>
+<table>
+<tr><th style="width:24%">Section</th><th>Content</th></tr>
+<tr><td>1. Decision &amp; recommendation</td><td>One paragraph: recommended configuration (model + engine + decode settings + precision), the key numbers with intervals, and the conditions under which the recommendation would change.</td></tr>
+<tr><td>2. Question, constraints, criteria</td><td>Decision statement, &delta;, critical slices, SLOs, hard gates, who agreed and when.</td></tr>
+<tr><td>3. Data</td><td>Gold-set version and size (segments, words, minutes), strata distribution, noise floor from double annotation, long-form set, non-speech battery size, drafting-model policy.</td></tr>
+<tr><td>4. Candidates &amp; controls</td><td>Grid of model &times; engine &times; configuration; versions and revisions; the incumbent control; resolved-config hashes.</td></tr>
+<tr><td>5. Accuracy results</td><td>Overall table with paired differences and intervals; per-slice table with <code>n</code>; script-split; entity/number accuracy; raw vs normalized; error taxonomy with examples.</td></tr>
+<tr><td>6. Safety &amp; robustness</td><td>Hallucination (with Wilson interval and manual review of content), deletions, loops, language-ID failures, perturbation deltas, determinism.</td></tr>
+<tr><td>7. Engine equivalence</td><td>For each engine change: paired difference within &plusmn;&delta;, output agreement, top divergences.</td></tr>
+<tr><td>8. Load &amp; capacity</td><td>Latency percentiles vs concurrency (with repeats), RTFx, error classes, knee, GPU telemetry, open- vs closed-loop caveat, capacity and cost per audio hour.</td></tr>
+<tr><td>9. Gates &amp; scoring</td><td>Gate table (pass/fail with reason); weighted matrix; sensitivity analysis; tie-breakers.</td></tr>
+<tr><td>10. Rollout &amp; risk</td><td>Shadow/canary plan, rollback triggers, owners, monitoring dashboards, re-evaluation schedule, risk register (below).</td></tr>
+<tr><td>11. Reproducibility</td><td>Commands/API calls, seeds, resolved configurations, data and code versions.</td></tr></table>
+
+<h4>Risk register starters</h4>
+<table><tr><th>Risk</th><th>Early signal</th><th>Mitigation</th></tr>
+<tr><td>Gold set not representative of production</td><td>Shadow disagreement &gt; gold-set disagreement; new dialect/domain in traffic</td><td>Refresh gold quarterly from sampled production audio; track strata drift</td></tr>
+<tr><td>Reference bias toward the drafting model</td><td>Ranking differs on blind double-annotated subset</td><td>Diverse drafting; blind subset; exclusion check (§3.3)</td></tr>
+<tr><td>Hallucination in production</td><td>Non-empty output on silent/hold audio; long repeated phrases</td><td>VAD/energy gate, empty-output monitor, phrase blocklist, human sampling</td></tr>
+<tr><td>Engine/driver upgrade changes outputs</td><td>Regression gate fails on re-run</td><td>CI regression run on every version bump; pinned versions</td></tr>
+<tr><td>Tail latency worse in production than in tests</td><td>Open-loop p99 &gt; closed-loop p99</td><td>Open-loop tests; headroom; load shedding</td></tr>
+<tr><td>Gated or licensed model access revoked / terms change</td><td>Licence review dates</td><td>Pin revisions; keep an approved fallback</td></tr>
+<tr><td>Privacy breach via external adapter</td><td>Any <code>external=true</code> endpoint in a run</td><td>Registry flag, review gate, network egress policy</td></tr></table>
+
+<h2>12. Why this or that: reasoning about the candidates</h2>
+<div class="box warn"><b class="t">Read this first</b> This section does <b>not</b> pick a winner. Rankings from public benchmarks measure other people's audio, normalization and decoding settings, and the most prominent claims below are vendor-reported. The purpose is to show <i>how to reason</i> from what is known to hypotheses worth testing, and to state what evidence would confirm or overturn each.</div>
+
+<h3>12.1 What is established about the named candidates</h3>
+<table><tr><th>Item</th><th>Established facts</th><th>Evidence</th></tr>
+<tr><td><b>Jais-ASR</b> (IFM)</td><td>Based on Jais-3-4B; Modern Standard Arabic plus dialects from 19 Arab countries with code-switching into English, French, Spanish and Italian; optional diacritization; built-in language/dialect identification; an explicit no-speech signal; Apache-2.0 weights; vLLM plugin for an OpenAI-compatible transcriptions endpoint; bf16 weights 11.4 GB; Hub metadata lists ~5.7B parameters and <i>custom code</i>. The card reports 22.85% WER / 8.37% CER averaged on the Open Universal Arabic ASR Leaderboard, lower than all compared models including cohere-transcribe-arabic-07-2026.</td><td><span class="tag">vendor-reported</span> (model card; benchmark chart authored by the model's developer)</td></tr>
+<tr><td><b>Cohere Transcribe Arabic (07-2026)</b></td><td>~2.07B parameters; architecture <code>cohere_asr</code>; Arabic and English; fine-tuned from cohere-transcribe-03-2026; Apache-2.0; <b>gated</b> on the Hub; integrates with Transformers. Cohere's own claims and serving guidance could not be retrieved during preparation (the blog was not reachable).</td><td><span class="tag">verified (Hub metadata)</span>; performance claims <i>not reviewed</i></td></tr>
+<tr><td><b>Whisper large-v3</b> (OpenAI)</td><td>Widely deployed multilingual model; measured hallucination on silence/non-vocal audio in third-party audits; mitigations are pipeline-level (VAD, conditioning, repetition control).</td><td><span class="tag">verified</span> (audit) / <span class="tag">community</span> (mitigations)</td></tr>
+<tr><td><b>vLLM</b></td><td>OpenAI-compatible transcription server with Whisper reference support; continuous batching/PagedAttention for LLM serving.</td><td><span class="tag">verified</span> (docs, paper)</td></tr>
+<tr><td><b>faster-whisper</b></td><td>CTranslate2 Whisper; batched mode much faster in its own benchmark but with VAD chunking and ignored options.</td><td><span class="tag">vendor-reported</span></td></tr>
+<tr><td><b>Open Universal Arabic ASR Leaderboard</b></td><td>Zero-shot evaluation on five multi-dialect test sets (SADA, Common Voice, MASC, MGB-2, Casablanca; MASC reported clean and noisy); average WER/CER ranking; its own normalization.</td><td><span class="tag">verified (abstract-level)</span>, normalization details secondary</td></tr></table>
+
+<h3>12.2 From facts to hypotheses worth testing</h3>
+<table><tr><th>Situation</th><th>Reasoning</th><th>Hypothesis to test in Mizan</th><th>What would overturn it</th></tr>
+<tr><td><b>Accuracy on Arabic dialects with English insertions is the priority</b></td><td>Arabic-specialised models are trained for dialect and code-switching; a general multilingual model optimizes breadth. Vendor charts favour the specialised models on public Arabic benchmarks; your audio may differ (telephony, noise, domain terms).</td><td>On <code>mixed</code> and dialect slices, specialised model(s) are non-inferior to or better than Whisper-family by more than &delta;; English-term preservation is acceptable under your script policy.</td><td>Paired CI on your <code>mixed</code> slice includes the incumbent as equal or better; high transliteration rate on English terms under a Latin-script policy.</td></tr>
+<tr><td><b>Throughput and cost per audio hour dominate (batch backlog)</b></td><td>Continuous batching keeps GPUs busy across many concurrent requests; model size sets memory and per-token cost (a ~2B model fits more concurrent sequences than a ~5.7B model on the same memory, all else equal).</td><td>Smaller model + vLLM reaches higher sustained RTFx at the knee than larger model on the same GPU; cost per audio hour lower by a margin that survives accuracy gating.</td><td>Load curves show the larger model's decoder is not the bottleneck (encoder/pre-processing bound) or accuracy gate eliminates the smaller model.</td></tr>
+<tr><td><b>Single stream, low latency (live agent assist)</b></td><td>Per-request latency depends on model depth, beam size and chunking, not on batching. Throughput-optimized serving settings (large <code>max-num-seqs</code>) can raise tail latency.</td><td>A tuned small-batch configuration meets p95 at concurrency 1&ndash;4 even if its peak RTFx is lower.</td><td>Open-loop p99 at the real arrival rate exceeds SLO.</td></tr>
+<tr><td><b>Whisper-family on a single GPU with lowest engineering effort</b></td><td>faster-whisper's batched pipeline is substantially faster than reference Whisper per its own benchmark; accuracy of that mode must be re-measured because of VAD chunking and ignored options.</td><td>Batched faster-whisper is equivalent (&plusmn;&delta;) to sequential on the gold set and non-speech battery, with lower hallucination thanks to VAD.</td><td>Increased deletions on soft speech or different long-form behaviour.</td></tr>
+<tr><td><b>Non-speech-heavy audio (hold music, silence)</b></td><td>Whisper-style decoders are documented to hallucinate here; a model with an explicit no-speech output, or a VAD gate, reduces exposure.</td><td>Candidate with explicit no-speech signal passes the non-speech battery bound without extra gating.</td><td>Hallucination upper bound above the limit; or VAD gating of the incumbent closes the gap, making the model change unnecessary.</td></tr>
+<tr><td><b>Data cannot leave the environment</b></td><td>Hosted APIs are excluded at the gate stage regardless of accuracy.</td><td>&mdash;</td><td>Legal/privacy review changes.</td></tr>
+<tr><td><b>Licence / access friction</b></td><td>Gated weights require licence acceptance and credentials in deployment pipelines; Apache-2.0 permits commercial use but check each model's full terms.</td><td>&mdash;</td><td>Terms change; access revoked.</td></tr></table>
+
+<h3>12.3 How to write the &ldquo;why&rdquo; so it survives review</h3>
+<p>Each recommendation in your technical report should have four parts: <b>Claim</b> (what you recommend), <b>Evidence</b> (the specific numbers with intervals and the run IDs), <b>Uncertainty</b> (what the intervals and slice sizes do not rule out; known limitations of the harness), and <b>Reversal conditions</b> (the measurable events that would make you switch back). Example form:</p>
+<div class="box"><i>Claim:</i> adopt model M on engine E with configuration K. <i>Evidence:</i> paired &Delta;WER = &minus;x.x pp [lo, hi] (n = &hellip; segments, &hellip; words, cluster bootstrap by recording, 2,000 resamples, seed s); mixed-slice &Delta;WER = &hellip; [&hellip;]; hallucination 0/&hellip; non-speech (&le; &hellip;% Wilson); p95 &hellip; ms / p99 &hellip; ms at concurrency c (3 repeats, open- and closed-loop); sustained RTFx &hellip;; cost per audio hour &hellip;. <i>Uncertainty:</i> dialect D has only &hellip; segments (indicative); loads measured on &hellip; hardware; gold-set drafted by system Y (blind subset agrees). <i>Reversal:</i> canary p99 &gt; &hellip; for &hellip; min; human-sampled WER &gt; &hellip;; any severity-1 hallucination.</div>
+
+<h3>12.4 Anti-patterns that produce confident, wrong decisions</h3>
+<ul>
+<li>Comparing a leaderboard number against your in-house number (different normalization, data, decoding).</li>
+<li>Declaring a winner from a single run, a single seed, or a gold set built from the winner's own drafts.</li>
+<li>Reporting mean-of-segment WER, or excluding the worst segments "as outliers" (loops and hallucinations are the product risk).</li>
+<li>Optimising decoding settings on the same data used for the final claim.</li>
+<li>Judging speed from a vendor README on different hardware, or from a closed-loop test at low concurrency.</li>
+<li>Swapping the engine and the model in the same step and attributing the change to the model.</li>
+<li>Treating "not significantly worse" on a small test set as "equivalent".</li></ul>
+
+<h2>13. How Mizan covers this, and where it does not (yet)</h2>
+<p>The table maps every technique in this report to Mizan 1.0 as built, and is deliberately candid about gaps &mdash; several are directly relevant to a &ldquo;swap with confidence&rdquo; decision.</p>
+<table><tr><th>Technique</th><th>Status</th><th>Notes</th></tr>
+<tr><td>Frozen, versioned, stratified gold sets; review workflow; audit log</td><td class="ok">Implemented</td><td>Gold items copy text, spans, strata and flags; byte-identical export/import</td></tr>
+<tr><td>Human noise floor (blind double annotation)</td><td class="ok">Implemented</td><td>IAA track; WER/CER agreement per annotator</td></tr>
+<tr><td>Versioned normalizer, rules printed in reports; raw text always stored</td><td class="ok">Implemented</td><td><code>arabic_v1</code>, <code>whisper_basic</code>, <code>none</code>; raw vs normalized side-by-side is by re-running with another normalizer, not a single view</td></tr>
+<tr><td>Corpus-level WER/CER/MER, insertion rate, latency mean/p50/p95, RTFx</td><td class="ok">Implemented</td><td>Validated against an independent <code>jiwer</code> oracle</td></tr>
+<tr><td>Script-split WER, English-term preservation, hallucination on non-speech</td><td class="ok">Implemented</td><td>Non-applicable segments excluded from aggregates</td></tr>
+<tr><td>Per-stratum tables; disagreement explorer; agreement mode</td><td class="ok">Implemented</td><td>Agreement results labelled as disagreement</td></tr>
+<tr><td>Bootstrap CI for a single system (1,000 seeded resamples)</td><td class="part">Partial</td><td>Resamples <i>segments</i> (not clusters); only WER and CER; reported per system</td></tr>
+<tr><td><b>Paired bootstrap CI of the WER difference between two runs</b></td><td class="gap">Gap</td><td>Compare view shows differences, not their uncertainty. <b>Highest-value addition for swap decisions.</b></td></tr>
+<tr><td>Non-inferiority / equivalence gate with a margin &delta;</td><td class="gap">Gap</td><td>Needs the paired CI above plus per-slice evaluation</td></tr>
+<tr><td>Cluster (speaker / recording) bootstrap; MAPSSWE / McNemar</td><td class="gap">Gap</td><td>Segments carry no speaker/recording ID in the resampling code yet (audio file ID exists)</td></tr>
+<tr><td>Switch-point (PIER-style), entity/number token metrics, multi-reference scoring, semantic metrics</td><td class="gap">Gap</td><td>Metric plugin interface supports adding them; spans are stored</td></tr>
+<tr><td>Deletion rate as a first-class metric; repetition-loop detector</td><td class="part">Partial</td><td>Insertion rate exists; D/N and loop detector can be added as metrics</td></tr>
+<tr><td>Reference-bias controls (exclude drafting model's segments)</td><td class="part">Partial</td><td>Drafting model recorded in <code>source</code>; no built-in exclusion analysis</td></tr>
+<tr><td>Long-form, file-level evaluation (chunking/stitching)</td><td class="gap">Gap</td><td>Pipeline is segment-based by design</td></tr>
+<tr><td>Load: concurrency ramp, p50/p95/p99, RTFx, error classes, saturation, guardrails, GPU telemetry</td><td class="ok">Implemented</td><td>Same adapter and data for every candidate</td></tr>
+<tr><td>Open-loop (arrival-rate) load generation; coordinated-omission correction</td><td class="gap">Gap</td><td>Generator is closed-loop; read p99 near saturation as optimistic (§9.3)</td></tr>
+<tr><td>Repeated-run variance, percentile CIs, cost per audio hour</td><td class="part">Partial</td><td>Repeat runs manually; cost is computed outside</td></tr>
+<tr><td>Weighted decision matrix with editable weights; ranking persisted</td><td class="ok">Implemented</td><td>No automatic sensitivity analysis yet; gates are manual</td></tr>
+<tr><td>Resolved config (adapter/model/normalizer/metric versions) for reproducibility</td><td class="ok">Implemented</td><td>Same config &rArr; same metrics (tested)</td></tr>
+<tr><td>Shadow-mode ingestion and canary monitoring</td><td class="gap">Gap</td><td>Outside v1 scope; agreement mode on exported traffic samples is a workable interim</td></tr></table>
+<h3>Suggested follow-up work, in priority order</h3>
+<ol>
+<li><b>Paired cluster bootstrap on the compare view and the report</b> (difference CI, per slice, with <code>n</code>), plus a configurable non-inferiority margin that turns the accuracy gate into a pass/fail row.</li>
+<li><b>Deletion-rate, loop-detector and token-class (numbers/entities/switch-point) metrics</b> as plugins, shown in the robustness section.</li>
+<li><b>Open-loop load mode</b> (fixed arrival rate, latency measured from intended send time) alongside the closed-loop ramp, with repeat-run spread.</li>
+<li><b>Weight-sensitivity analysis</b> in the decision section (rank stability under perturbation), and an explicit <b>gate table</b> that lists eliminated candidates and reasons.</li>
+<li><b>Long-form file-level evaluation track</b>, and a <b>reference-bias check</b> (results excluding the drafting model's segments).</li></ol>
+
+<h2 class="pb">Appendix A. Formula cheat-sheet</h2>
+<div class="eq">Edit counts          S substitutions, D deletions, I insertions, C correct;  N = S + D + C
+WER                  (S + D + I) / N                         (corpus: Σ(S+D+I) / ΣN)
+Deletion rate        D / N          Insertion rate  I / N
+CER                  edit distance on characters / reference characters
+MER                  (S + D + I) / (S + D + I + C)
+WIL                  1 − (C/N_ref)(C/N_hyp)
+Script-split WER_x   errors attributed to reference tokens of script x / N_x
+                     (insertions attributed by the inserted token's script)
+English preservation Σ matched English reference tokens / Σ English reference tokens   (fuzzy ratio ≥ 0.8)
+Hallucination rate   (# non-speech segments with > k tokens) / (# non-speech segments)      (Wilson interval)
+Bootstrap CI         percentiles of Σerr*/ΣN* over B resamples of segments (or clusters)
+Paired difference    d_b = WER_C(resample_b) − WER_I(resample_b), same indices
+Non-inferiority      upper 97.5% bound of (WER_C − WER_I) < δ
+Equivalence (TOST)   90% interval of (WER_C − WER_I) ⊂ [−δ, +δ]
+Required SE          SE_target ≈ δ / 2.8   (80% power, one-sided 97.5%, true difference 0)
+Wilson interval      p̃ ± z·sqrt(p̂(1−p̂)/n + z²/4n²) / (1 + z²/n),  p̃ = (p̂ + z²/2n)/(1 + z²/n)
+RTFx                 Σ audio seconds / Σ processing seconds           (state concurrency & hardware)
+Little's law         in-flight = throughput × mean latency
+Capacity             servers = peak audio-s per s ÷ (sustained RTFx at SLO × utilisation target)
+Cost / audio hour    GPU $/h ÷ (sustained RTFx × utilisation)
+p99 sample need      ≳ 10 / (1 − 0.99) = 1,000 samples (10,000 for p99.9)</div>
+
+<h2>Appendix B. Swap checklist (printable)</h2>
+<table><tr><th style="width:5%">&#9744;</th><th>Item</th></tr>
+<tr><td>&#9744;</td><td>Decision, margin &delta;, critical slices, SLOs and hard gates written and agreed <b>before</b> testing</td></tr>
+<tr><td>&#9744;</td><td>Gold set v1 frozen; stratified; non-speech battery and long-form track included; locked test partition defined</td></tr>
+<tr><td>&#9744;</td><td>Human noise floor measured on a blind double-annotated sample; reference-bias check planned (drafting model recorded)</td></tr>
+<tr><td>&#9744;</td><td>Normalizer version fixed and printed; raw and normalized results available; English-script policy written</td></tr>
+<tr><td>&#9744;</td><td>Incumbent baseline measured with the production configuration, same harness</td></tr>
+<tr><td>&#9744;</td><td>Candidate grid pre-declared; model, engine and decode-config effects separable; incumbent pre/post-processing included as control</td></tr>
+<tr><td>&#9744;</td><td>Corpus-level metrics: WER, CER, MER, deletion, insertion, script-split, English preservation, entity/number accuracy</td></tr>
+<tr><td>&#9744;</td><td>Paired (cluster) bootstrap difference with interval; non-inferiority or equivalence stated explicitly; per-slice tests with <code>n</code></td></tr>
+<tr><td>&#9744;</td><td>Hallucination battery run; Wilson interval; hallucination content reviewed manually</td></tr>
+<tr><td>&#9744;</td><td>Engine equivalence test for every engine change (agreement, top divergences, per-slice)</td></tr>
+<tr><td>&#9744;</td><td>Load: ramp, knee, error classes, GPU telemetry, 3 repeats, warm-up discarded, same hardware/data; open-loop test where arrivals are independent</td></tr>
+<tr><td>&#9744;</td><td>Accuracy spot-check at the chosen concurrency / batch setting</td></tr>
+<tr><td>&#9744;</td><td>Hard gates applied (privacy/external, licence/access, hardware fit, SLO, safety); eliminated candidates documented</td></tr>
+<tr><td>&#9744;</td><td>Weighted ranking with sensitivity analysis; absolute RTFx and cost shown beside scores</td></tr>
+<tr><td>&#9744;</td><td>Shadow run with agreement + sampled human review; canary plan with rollback triggers and warm incumbent</td></tr>
+<tr><td>&#9744;</td><td>Decision memo filed with resolved configs, seeds, versions; re-evaluation scheduled (version bumps, quarterly)</td></tr></table>
+
+<h2>Appendix C. References and evidence quality</h2>
+<p class="small">Compiled during preparation (12 November 2026). &ldquo;Primary&rdquo; = the paper/documentation itself was located; &ldquo;secondary&rdquo; = a summary, vendor blog or community post was the only text reviewed. Vendor benchmark figures are not independent. Verify against the primary source before quoting numbers externally.</p>
+<ol class="small">
+<li>Open ASR Leaderboard: Towards Reproducible and Transparent Multilingual and Long-Form Speech Recognition Evaluation (RTFx definition, normalization, architecture findings). <a href="https://arxiv.org/abs/2510.06961">arxiv.org/abs/2510.06961</a> &mdash; primary (search-result summaries; later versions differ in details, check the latest).</li>
+<li>Open Universal Arabic ASR Leaderboard. <a href="https://arxiv.org/pdf/2412.13788">arxiv.org/pdf/2412.13788</a>; code: github.com/Natural-Language-Processing-Elm/open_universal_arabic_asr_leaderboard &mdash; protocol details from secondary summaries.</li>
+<li>vLLM documentation: Speech-to-Text (Transcriptions API), and &ldquo;Transcription&rdquo; model-contribution guide. <a href="https://docs.vllm.ai/en/stable/contributing/model/transcription/">docs.vllm.ai/en/stable/contributing/model/transcription/</a> &mdash; primary (version-specific).</li>
+<li>Kwon et al., Efficient Memory Management for Large Language Model Serving with PagedAttention (SOSP 2023). <a href="https://arxiv.org/abs/2309.06180">arxiv.org/abs/2309.06180</a> &mdash; primary (LLM workloads).</li>
+<li>faster-whisper (SYSTRAN; CTranslate2) README and benchmarks. <a href="https://pypi.org/project/faster-whisper">pypi.org/project/faster-whisper</a> &mdash; vendor-reported.</li>
+<li>Bisani &amp; Ney, Bootstrap Estimates for Confidence Intervals in ASR Performance Evaluation, ICASSP 2004; BootLog tool. <a href="https://www-i6.informatik.rwth-aachen.de/~bisani/bootlog.html">www-i6.informatik.rwth-aachen.de/~bisani/bootlog.html</a> &mdash; primary (abstract-level).</li>
+<li>Statistical Testing on ASR Performance via Blockwise Bootstrap. <a href="https://arxiv.org/pdf/1912.09508">arxiv.org/pdf/1912.09508</a> &mdash; primary (abstract-level).</li>
+<li>Gillick &amp; Cox, Some Statistical Issues in the Comparison of Speech Recognition Algorithms, ICASSP 1989 (McNemar, MAPSSWE). <a href="https://researchr.org/publication/GillickC89">researchr.org/publication/GillickC89</a> &mdash; bibliographic record and citing papers only.</li>
+<li>Koenecke et al., Careless Whisper: Speech-to-Text Hallucination Harms, FAccT 2024. <a href="https://arxiv.org/abs/2402.08021">arxiv.org/abs/2402.08021</a> &mdash; primary (abstract and summaries).</li>
+<li>Whisper hallucination mitigation guidance (VAD, <code>condition_on_previous_text</code>, repetition controls). <a href="https://www.popularai.org/p/whisper-hallucinations-during-silence">popularai.org/p/whisper-hallucinations-during-silence</a>; faster-whisper issue 843 &mdash; community; one preprint figure (hallucination near 100% on non-speech) from a secondary summary, not verified.</li>
+<li>Benchmarking Arabic&ndash;English code-switching ASR (ArzEn; WER, CER, MER, WIL). <a href="https://arxiv.org/pdf/2211.16319.pdf">arxiv.org/pdf/2211.16319.pdf</a> &mdash; primary (abstract-level).</li>
+<li>PIER: A Novel Metric for Evaluating What Matters in Code-Switching. <a href="https://arxiv.org/html/2501.09512v2">arxiv.org/html/2501.09512v2</a> &mdash; primary (abstract-level).</li>
+<li>PolyWER (Findings of EMNLP 2024). <a href="https://aclanthology.org/2024.findings-emnlp.356.pdf">aclanthology.org/2024.findings-emnlp.356.pdf</a> &mdash; primary (abstract-level).</li>
+<li>Semantic Distance: A New Metric for ASR Performance Analysis. <a href="https://arxiv.org/abs/2104.02138">arxiv.org/abs/2104.02138</a>; H_eval hybrid metric: <a href="https://arxiv.org/abs/2211.01722">arxiv.org/abs/2211.01722</a> &mdash; preprints.</li>
+<li>Jais-ASR model card (IFM). <a href="https://huggingface.co/IFM/Jais-ASR">huggingface.co/IFM/Jais-ASR</a> &mdash; vendor-reported.</li>
+<li>cohere-transcribe-arabic-07-2026 (Hub metadata). <a href="https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026">huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026</a> &mdash; metadata verified; release blog not reviewed.</li>
+<li>Coordinated omission: Tene (mechanical-sympathy list) <a href="https://groups.google.com/g/mechanical-sympathy/c/icNZJejUHfE/m/BfDekfBEs_sJ">groups.google.com/g/mechanical-sympathy/c/icNZJejUHfE</a>; overview: <a href="https://highscalability.com/your-load-generator-is-probably-lying-to-you-take-the-red-pi/">highscalability.com</a> &mdash; secondary write-ups of the original talk.</li>
+</ol>
+<p class="small"><b>Simulations in this report</b> (Figures 1&ndash;3; power table) were produced with synthetic models and fixed random seeds; assumptions are stated in the captions. The worked WER example was computed with Mizan's own metric and normalizer code. None use your data.</p>

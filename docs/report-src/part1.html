@@ -1,0 +1,128 @@
+<div class="cover">
+  <h1>Swapping Speech-Recognition Models and Inference Engines with Confidence</h1>
+  <div class="sub">Evaluation techniques, algorithms, best practices, and a decision framework<br>for Arabic / English code-switched transcription</div>
+  <div class="box key"><b class="t">What this document is</b>
+  A technical guide and decision report. It explains how to measure whether a candidate <i>model</i>, <i>inference engine</i> or <i>serving configuration</i> is
+  accurate enough, robust enough and fast enough to replace what you run today, how to quantify the uncertainty in that answer, and how to write the decision down so that it is reproducible.
+  It is written to be used with Mizan, but every technique is tool-independent.</div>
+  <div class="box warn"><b class="t">What this document is not</b>
+  It contains <b>no benchmark results for your audio</b> and does not rank Jais-ASR, Cohere Transcribe Arabic, Whisper or any engine. Public rankings do not transfer to your data;
+  the report says why, and gives you the procedure and the decision template that produces a defensible ranking on <i>your</i> gold set. Numbers shown in worked examples and simulations are labelled as such.</div>
+  <div class="meta">Version 1.0 · 12 November 2026 · Companion to the Mizan evaluation workbench<br>
+  Evidence labels used throughout: <span class="tag">verified</span> checked against a primary source during preparation · <span class="tag">vendor-reported</span> published by the model/engine author, not independently reproduced ·
+  <span class="tag">community</span> blog / forum / issue-tracker guidance · <span class="tag">simulation</span> computed for this report with stated assumptions · <span class="tag">practice</span> widely used engineering practice, not a cited result.</div>
+</div>
+
+<h2 style="margin-top:0">Contents</h2>
+<div class="toc">
+<div><span class="n">1</span>Executive summary and the decision in one page</div>
+<div><span class="n">2</span>Framing a swap: what exactly is being changed?</div>
+<div><span class="n">3</span>Golden data: the foundation everything rests on</div>
+<div><span class="n">4</span>Text normalization</div>
+<div><span class="n">5</span>Accuracy metrics and algorithms</div>
+<div><span class="n">6</span>Statistical rigor: knowing whether a difference is real</div>
+<div><span class="n">7</span>Robustness, slices and failure-mode testing</div>
+<div><span class="n">8</span>Inference engines: what changes when you change the runtime</div>
+<div><span class="n">9</span>Non-functional evaluation: latency, throughput, load</div>
+<div><span class="n">10</span>The swap protocol: from candidate to production</div>
+<div><span class="n">11</span>Decision framework and the technical report template</div>
+<div><span class="n">12</span>Why this or that: reasoning about the candidates</div>
+<div><span class="n">13</span>How Mizan covers this, and where it does not (yet)</div>
+<div><span class="n">A</span>Formula cheat-sheet</div>
+<div><span class="n">B</span>Swap checklist (printable)</div>
+<div><span class="n">C</span>References and evidence quality</div>
+</div>
+
+<h2 class="pb">1. Executive summary and the decision in one page</h2>
+<p>Replacing an ASR model or inference engine is a <b>statistical decision under uncertainty with an operational constraint set</b>. The failure modes are well known: comparing numbers produced under different text normalization;
+trusting a public leaderboard that does not resemble your audio; declaring a 0.5-point WER gap "better" with a few hundred words of test data; evaluating accuracy on one engine and speed on another; and discovering in production that
+the faster configuration silently changed the output (VAD chunking, dropped decoding safeguards, lower precision) or hallucinates on silence.</p>
+
+<div class="box key"><b class="t">The ten rules this report argues for</b>
+<ol>
+<li><b>Separate the three things you can change</b> &mdash; model, engine, serving/decoding configuration &mdash; and test them in a design that lets you attribute any difference to one of them (§2, §8).</li>
+<li><b>Own the reference.</b> Build a frozen, versioned, stratified gold set from your audio, and measure how much two humans disagree on it; that is your noise floor (§3).</li>
+<li><b>Fix and record the normalizer.</b> The same two transcripts can differ by tens of points of WER depending on diacritics, hamza, digits and punctuation rules. Version it, print it, report raw and normalized (§4).</li>
+<li><b>Use corpus-level metrics</b>, never an average of per-segment error rates, and report more than WER: CER, MER, script-split WER, insertions (loops), deletions (dropped speech), hallucination on non-speech (§5).</li>
+<li><b>Report intervals, and compare systems with paired tests.</b> A swap is a <i>non-inferiority</i> claim with an explicit margin, not "the number is lower" (§6).</li>
+<li><b>Slice before you decide.</b> An aggregate win can hide a regression on code-switch points, a dialect, short segments, noise or silence (§7).</li>
+<li><b>Re-evaluate whenever the engine or decoding config changes</b>, even for the same weights: batched/VAD pipelines, quantization and decoding parameters change outputs (§8).</li>
+<li><b>Load-test with the same adapter and data, in a way that does not hide the tail</b>: understand closed- vs open-loop generators and coordinated omission (§9).</li>
+<li><b>Gate first, score second.</b> Hard constraints (privacy, licence, hardware fit, SLO, safety) eliminate candidates; a weighted matrix only ranks survivors, and its weights get a sensitivity analysis (§11).</li>
+<li><b>Ship in stages</b> &mdash; shadow, canary, rollback criteria &mdash; and keep the resolved configuration of every run so the decision is reproducible (§10).</li>
+</ol></div>
+
+<h3>The decision rule in one paragraph</h3>
+<p>Adopt candidate <i>C</i> over incumbent <i>I</i> when: (a) on the frozen gold set, the paired 95% upper confidence bound of <code>WER(C) &minus; WER(I)</code> is below your pre-agreed margin &delta; (non-inferiority), on the overall set <b>and</b> on every pre-declared critical slice, or <i>C</i> is significantly better where you claim improvement; (b) safety metrics (hallucination on non-speech, deletion rate, repetition loops) are no worse than a pre-agreed bound; (c) at your target concurrency, p95/p99 latency meet the SLO with errors below budget and the sustained throughput covers peak load with headroom; (d) hard constraints hold; and (e) a shadow run on live traffic shows agreement with the incumbent consistent with the gold-set result. Everything in this report is in service of making each clause measurable.</p>
+
+<h3>Evidence-based observations that shape the advice</h3>
+<ul>
+<li>The Open ASR Leaderboard paper reports that Conformer-encoder / transformer-decoder systems achieve the best average WER while CTC and TDT decoders offer superior inverse real-time factor (RTFx) &mdash; accuracy and speed trade off along architecture lines, so a single "best" does not exist. <span class="tag">verified</span></li>
+<li>Whisper-family hallucination is a measured phenomenon: an audit found roughly 1% of sampled transcriptions contained hallucinations, 38% of those with explicit harms, with silences and long non-vocal stretches as likely triggers; the other commercial systems audited did not show it. <span class="tag">verified</span> Non-speech test cases are therefore mandatory, not optional.</li>
+<li>faster-whisper's own documentation states its batched mode uses VAD chunking and ignores some decoding options; speed numbers it publishes are its own. Accuracy must be re-measured for any such pipeline. <span class="tag">vendor-reported</span></li>
+<li>Bisani &amp; Ney showed that confidence intervals on WER are wide and that most reported improvements in the literature were not much larger than the standard error; resampling at the speaker level gives wider (more honest) intervals than resampling sentences. <span class="tag">verified</span></li>
+<li>A closed-loop load generator under-reports tail latency during stalls (coordinated omission). In the simulation in §9, an identical 2-second stall yields p99 = 20 ms under a closed-loop client and p99 = 1,840 ms under an open-loop schedule. <span class="tag">simulation</span></li>
+</ul>
+
+<h2>2. Framing a swap: what exactly is being changed?</h2>
+<p>"Swap Whisper for Jais-ASR on vLLM" bundles at least five changes. Treat them as separate factors:</p>
+<table><tr><th>Factor</th><th>Examples</th><th>What it can change</th><th>How to isolate it</th></tr>
+<tr><td><b>Model weights</b></td><td>Whisper large-v3 &rarr; Jais-ASR; Cohere Transcribe Arabic</td><td>Accuracy profile, dialect/code-switch behaviour, output style (diacritics, numerals, punctuation, scripts of English words), hallucination behaviour, licence</td><td>Same engine &amp; decode config, different weights</td></tr>
+<tr><td><b>Inference engine / runtime</b></td><td>vLLM, faster-whisper (CTranslate2), Transformers, whisper.cpp, TensorRT-LLM/Triton, hosted API</td><td>Throughput, latency, memory, numerical results (kernels, precision), <i>supported decoding features</i>, chunking behaviour, max input size</td><td>Same weights &amp; settings on two engines (equivalence test, §8)</td></tr>
+<tr><td><b>Precision / quantization</b></td><td>bf16, fp16, int8, int4</td><td>Small accuracy shifts that are larger on hard slices; memory and speed</td><td>Same engine, same weights, different dtype</td></tr>
+<tr><td><b>Decoding &amp; pre/post-processing</b></td><td>beam size, temperature fallback, language forcing, VAD, <code>condition_on_previous_text</code>, repetition controls, prompt, text post-processing</td><td>Hallucination, loops, deletions, long-form stitching, WER</td><td>Hold everything else fixed; sweep one parameter</td></tr>
+<tr><td><b>Serving configuration</b></td><td>max concurrent sequences, batch size, GPU memory fraction, timeouts, segment length, payload limits</td><td>Latency distribution, saturation point, error rate; sometimes accuracy (batch-size-dependent numerics)</td><td>Load-test grid; re-check accuracy at the chosen setting</td></tr></table>
+
+<div class="box warn"><b class="t">Confounding is the default</b>
+If you compare "incumbent = Whisper on faster-whisper with VAD" against "candidate = Jais-ASR on vLLM without VAD", any accuracy or speed difference is a mixture of model, engine and pipeline effects. A decision memo that cannot say <i>which</i> factor caused a gain will not survive the first regression. Use a factorial grid where you can afford it (e.g. 2 models &times; 2 engines), and at minimum run each candidate with the <i>incumbent's</i> pre/post-processing as well as its own.</div>
+
+<h3>Three kinds of claim, three kinds of test</h3>
+<table><tr><th>Claim</th><th>Statistical form</th><th>Typical use</th></tr>
+<tr><td><b>Superiority</b> &mdash; "C is more accurate than I"</td><td>Paired CI of the difference excludes 0 in the favourable direction</td><td>Model upgrade justified by accuracy</td></tr>
+<tr><td><b>Non-inferiority</b> &mdash; "C is no worse than I by more than &delta;"</td><td>Upper bound of the (C &minus; I) CI is below &delta;</td><td>Cost/latency-driven swap; engine change; quantization</td></tr>
+<tr><td><b>Equivalence</b> &mdash; "same weights on a new engine give the same results"</td><td>CI of the difference lies within &plusmn;&delta; (two one-sided tests), <i>and</i> output-level agreement is high</td><td>Engine migration</td></tr></table>
+<p>Choosing &delta; is a business decision made <i>before</i> looking at results (for example "no more than 0.5 percentage points absolute WER overall and 1.0 on any critical slice"). There is no universal value; make the number explicit and record who agreed to it.</p>
+
+<h2>3. Golden data: the foundation everything rests on</h2>
+<h3>3.1 What a gold set must be</h3>
+<ul>
+<li><b>Representative.</b> Sample from the audio you will actually transcribe (channel, codec, noise, dialects, domain vocabulary, speaker mix). A public benchmark measures the benchmark.</li>
+<li><b>Stratified and labelled.</b> Record strata you will want to slice by: language mix (<code>ar</code>, <code>en</code>, <code>mixed</code>), duration bucket, dialect, noise/SNR bucket, domain, speaker. Strata must exist <i>before</i> evaluation so slices are pre-declared rather than fished for.</li>
+<li><b>Frozen and versioned.</b> A gold set is an immutable snapshot (v1, v2 &hellip;). Never edit v1 after a decision was made on it; fix errors in v2 and re-run.</li>
+<li><b>Split.</b> Keep a <i>development</i> portion (for choosing decoding settings, normalizer details, thresholds) and a <i>locked test</i> portion touched only for the final decision. Tuning on the test set inflates the winner.</li>
+<li><b>Includes non-speech.</b> Silence, music, hold tones, breathing, DTMF, cross-talk. These are the segments where hallucination appears (§7).</li>
+<li><b>Includes a long-form track.</b> Segment-level evaluation hides chunking, stitching and timeout behaviour. Keep a small set of whole files evaluated end-to-end (§8.4).</li>
+</ul>
+
+<h3>3.2 How big?</h3>
+<p>Size is set by the <b>smallest difference you must detect</b> and by how correlated segments are. In a <span class="tag">simulation</span> (synthetic per-segment difficulty shared across systems; mean ~12 words/segment; baseline WER &asymp; 15%; paired bootstrap, 95% CI excludes 0) the probability of detecting a true absolute WER gap was:</p>
+@@POWER_TABLE@@
+<figure><img src="fig/power.png" alt="power simulation"><figcaption>Figure 1. Left: power to detect a true WER difference using a paired bootstrap (solid) versus independent per-system intervals (dashed). Right: half-width of one system's 95% interval versus test-set size. Synthetic model; use your own pilot data to size the real set (Mizan's bootstrap on a pilot run gives the variance).</figcaption></figure>
+<div class="box key"><b class="t">Take-aways from the simulation (assumptions apply)</b>
+<ul><li><b>Pairing is worth roughly a 4&times; larger test set.</b> Because both systems face the same hard segments, their errors are correlated and the paired difference has far lower variance than two independent intervals. Never eyeball two overlapping per-system intervals; compare paired.</li>
+<li>A <b>2-point</b> gap needed on the order of 400 segments for ~80% power when paired, but ~1,600 when judged by independent intervals; a <b>1-point</b> gap needed well over 800 even when paired.</li>
+<li>A single system's WER at ~800 segments still carries about &plusmn;1.3 points. A "0.3 point improvement" on a few hundred segments is noise.</li></ul></div>
+<p>Practical sizing recipe: (1) run both systems on a pilot of 150&ndash;200 segments; (2) compute the paired bootstrap SD of the WER difference; (3) required segments scale as (SD<sub>pilot</sub> / SE<sub>target</sub>)<sup>2</sup> &times; n<sub>pilot</sub>, with SE<sub>target</sub> = &delta; / 2.8 (z<sub>0.975</sub> + z<sub>0.80</sub> = 1.96 + 0.84, assuming the true difference is zero) for 80% power on a one-sided 97.5% non-inferiority bound. Treat as an estimate and re-check after the real run.</p>
+
+<h3>3.3 Reference quality and the human noise floor</h3>
+<p>A reference is itself a noisy measurement. If two competent annotators transcribing the same audio disagree at, say, 5% WER (after the same normalization), then differences between systems below that level are not interpretable as accuracy differences. Therefore:</p>
+<ul>
+<li>Run <b>blind double annotation</b> on a sample (Mizan: IAA track, default 5%). Report human-vs-human WER/CER and treat it as the noise floor.</li>
+<li>Require <b>reviewer &ne; author</b> and keep comment threads; disagreement patterns (spelling variants, dialect words, numbers) feed the normalizer (§4).</li>
+<li>Dialectal Arabic has no single standard orthography; many valid spellings exist. Where disputes are systematic, either normalize them (documented rule) or use multi-reference scoring (see PolyWER and multi-reference WER, §5.6).</li>
+</ul>
+
+<div class="box bad"><b class="t">Reference bias from machine drafts</b>
+Bootstrapping references by correcting a model's draft is efficient, but annotators anchor on what they see: the drafting model's idiosyncratic spellings, word choices and omissions survive review more often than competing systems' variants. The drafting model then looks better on the gold set than it would against references written from scratch. <span class="tag">practice</span>
+<b>Mitigations:</b> (1) draft with a system that is <i>not</i> a candidate, or draw drafts from several systems/ROVER-style combination; (2) keep a blind from-scratch subset (the IAA track) and check that the candidate ranking agrees on it; (3) record the drafting model per segment (Mizan stores <code>source = machine:&lt;endpoint&gt;</code>) and report results with that model's drafted segments excluded as a robustness check.</div>
+
+<h3>3.4 Contamination and leakage</h3>
+<p>If a candidate was trained on your public test data (or on audio overlapping it), its score is inflated. Prefer private, recent in-house audio; for any public data, check the model card and training-data statements; and treat a model that is dramatically better on public sets than on your private set as a contamination warning.</p>
+
+<h3>3.5 Annotation protocol essentials</h3>
+<ul>
+<li>Write a style guide before annotating: verbatim vs clean (fillers, repetitions, false starts), how to write numbers, English words (Latin vs Arabic script), acronyms, dialectal words, unintelligible markers, overlapping speech.</li>
+<li>Decide whether references carry diacritics (tashkeel). Most systems do not output them consistently; the normalizer will strip them (§4), but the policy must be written down.</li>
+<li>Store timestamps, flags (<code>no_speech</code>, <code>music</code>, <code>overlap</code>, <code>unintelligible</code>, <code>truncated</code>) and language spans on every segment; exclude <code>unintelligible</code> from scoring by policy and report the count.</li>
+<li>Treat segmentation as part of the reference: segment boundaries that cut words (forced splits) create artificial errors. Flag and count truncated segments.</li>
+</ul>

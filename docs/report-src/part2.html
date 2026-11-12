@@ -1,0 +1,137 @@
+<h2>4. Text normalization</h2>
+<p>WER compares strings; strings differ for reasons that are not recognition errors. Normalization maps both reference and hypothesis into a canonical form before alignment. It is the single largest source of non-comparable numbers in published ASR results: a third-party summary of the Open Universal Arabic leaderboard says it strips punctuation and diacritics and standardizes numerals, the QCRI Arabic+English leaderboard removes diacritics, and Cohere's normalizer additionally transliterates numerals, removes tatweel and applies NFKC &mdash; so scores from these protocols are <b>not directly comparable</b>. <span class="tag">community / vendor-reported</span> The Open ASR Leaderboard paper describes its English normalizer as closely following Whisper's (casing, punctuation, number conversion, spelling standardization, filler-word removal). <span class="tag">verified</span></p>
+
+<h3>4.1 Principles</h3>
+<ol>
+<li><b>Same normalizer on reference and hypothesis, always.</b> Normalizing only one side manufactures errors.</li>
+<li><b>Version and print it.</b> The normalizer kind and version are part of the run's identity; its rules are printed in every report. Changing a rule creates a new run.</li>
+<li><b>Normalize away what the downstream use does not care about</b> (diacritics for search/analytics) and <b>keep what it does</b> (digits if downstream parses amounts; diacritics if you sell vowelized output).</li>
+<li><b>Never mutate stored text.</b> Keep raw hypotheses and references; normalization happens at scoring time so you can re-score under a different policy.</li>
+<li><b>Report raw and normalized WER side by side.</b> The gap shows how much a candidate relies on formatting luck; a model with excellent normalized WER but poor raw WER may need a post-processing step.</li>
+</ol>
+
+<h3>4.2 The Arabic rules used by Mizan (<code>arabic_v1</code>, applied in order)</h3>
+<table><tr><th>#</th><th>Rule</th><th>Why</th></tr>
+<tr><td>1</td><td>Unicode NFC</td><td>Composed/decomposed forms compare unequal otherwise</td></tr>
+<tr><td>2</td><td>Remove tatweel (U+0640) and harakat/diacritics U+064B&ndash;U+0652, U+0670</td><td>Elongation and vowel marks are optional and inconsistently produced</td></tr>
+<tr><td>3</td><td>Alef variants <span class="ar">أ إ آ ٱ</span> &rarr; <span class="ar">ا</span></td><td>Hamza-on-alef spelling is a classic inconsistency</td></tr>
+<tr><td>4</td><td><span class="ar">ة</span>&rarr;<span class="ar">ه</span>; <span class="ar">ى</span>&rarr;<span class="ar">ي</span>; (optional) <span class="ar">ؤ</span>&rarr;<span class="ar">و</span>, <span class="ar">ئ</span>&rarr;<span class="ar">ي</span></td><td>Common orthographic variants; the hamza folding is configurable</td></tr>
+<tr><td>5</td><td>Arabic-Indic and Persian digits &rarr; ASCII digits</td><td>Same number, different glyphs</td></tr>
+<tr><td>6</td><td>Arabic punctuation <span class="ar">، ؛ ؟</span> and ASCII punctuation &rarr; space (keep intra-word apostrophes in Latin words)</td><td>Punctuation is not a recognition target here; <i>don't</i> must stay one token</td></tr>
+<tr><td>7</td><td>Latin &rarr; lowercase</td><td>Casing of English words in code-switched text</td></tr>
+<tr><td>8</td><td>Collapse whitespace; strip</td><td>Tokenization stability</td></tr>
+<tr><td>9</td><td>Number words &harr; digits are <b>not</b> converted</td><td>Needs a language-aware inverse text normalizer; state the limitation</td></tr></table>
+<p><b>Worked effect</b> (real Mizan code, five illustrative segment pairs, §5.1): corpus WER is <b>75.0%</b> on raw strings and <b>56.25%</b> after normalization &mdash; the 18.75-point difference is spelling/diacritic/casing noise, not recognition. The same example illustrates why raw-only comparisons mislead.</p>
+
+<h3>4.3 Pitfalls specific to Arabic&ndash;English code-switching</h3>
+<ul>
+<li><b>Script of English words.</b> The same spoken English term can be written <i>meeting</i> or <span class="ar">ميتنج</span>. If the reference uses Latin script and the model transliterates (or vice versa) every such word is an error although it was recognized. Decide the policy in the style guide, then measure it explicitly with an English-term preservation metric (§5.4) rather than hiding it in WER. If transliteration is acceptable, use multi-reference or transliteration-aware scoring (PolyWER; §5.6).</li>
+<li><b>Clitic attachment.</b> Arabic conjunctions and prepositions attach to words (<span class="ar">والكتاب</span> = "and the book"); one wrong clitic makes the whole token wrong. WER is therefore harsher on Arabic than on English for the same acoustic error. Always report CER next to WER.</li>
+<li><b>Output style differences between models.</b> Some models emit diacritics (Jais-ASR offers optional diacritization), punctuation, or sentinel tokens (the Jais adapter in Mizan maps <code>[IFM-NoTranscript]</code> to "no speech"). Normalization and adapter rules must absorb these so style is not scored as error.</li>
+<li><b>Numbers.</b> Spoken numbers appear as words or digits depending on the model. Without inverse text normalization, WER penalizes the formatting difference. Either normalize both to one form or add a numbers-specific accuracy metric.</li>
+<li><b>Dialect spelling.</b> Where annotators disagree systematically, derive a rule from the IAA disagreements instead of deciding case by case.</li>
+</ul>
+<div class="box key"><b class="t">Best practice</b> Keep a small "normalizer golden test" (Mizan ships four fixtures) and extend it with every rule change. Rule changes must be reviewed like code, because they move every historical number.</div>
+
+<h2>5. Accuracy metrics and algorithms</h2>
+<h3>5.1 Edit-distance error rates</h3>
+<p>All error-rate metrics start from a minimum-cost <b>alignment</b> between reference tokens and hypothesis tokens (Levenshtein/dynamic programming; unit cost for substitution, deletion and insertion). Let S, D, I be the counts of substitutions, deletions, insertions, C the correct matches, and N = S + D + C the reference length.</p>
+<div class="eq">WER = (S + D + I) / N                 may exceed 100% (insertions are unbounded)
+CER = same, on characters (state whether spaces count; Mizan counts them)
+MER = (S + D + I) / (S + D + I + C)     bounded in [0, 1]
+WIL = 1 − (C / N_ref) · (C / N_hyp)     word information lost (Morris et al. style)</div>
+<p><b>Alignment ties.</b> Several alignments can have the same minimum cost; the <i>total</i> error count is identical but the split between S, D and I (and any attribution to scripts) can differ. Use one alignment engine for every metric (Mizan uses <code>jiwer</code> throughout) so script-split numbers add up to the total.</p>
+
+<h4>Worked example (computed with Mizan's metric code; after <code>arabic_v1</code>)</h4>
+@@EXAMPLE_TABLE@@
+<div class="box key"><b class="t">What the example teaches</b>
+<ul>
+<li><b>Corpus-level vs mean of means.</b> Corpus WER = 9 errors / 16 reference words = <b>56.25%</b>. The mean of the five per-segment WERs is <b>123%</b> &mdash; one repetition-loop segment (WER 500%) dominates. Always aggregate as &Sigma;errors / &Sigma;N, and report insertions separately.</li>
+<li><b>One pathological segment moves everything.</b> Excluding the loop, corpus WER over the other four segments is 4/15 = <b>26.7%</b>. A model that loops occasionally can lose to a plainer model on WER while being far worse operationally &mdash; and vice versa. Read WER together with the insertion rate (here 37.5%).</li>
+<li><b>MER (40.9%) is bounded</b>, CER (60.9%) is dominated by the loop's characters. Different lenses, same data.</li>
+<li><b>Script-split:</b> WER-AR 77.8% vs WER-EN 28.6%: the aggregate hides that the Arabic side is where the damage is (insertions are attributed to the script of the inserted token).</li></ul></div>
+
+<h3>5.2 Which metric answers which question</h3>
+<table><tr><th>Question</th><th>Metric</th><th>Notes</th></tr>
+<tr><td>How often is a word wrong?</td><td>WER (corpus-level)</td><td>Primary headline; harsh for agglutinative Arabic</td></tr>
+<tr><td>How close are the strings, ignoring word-boundary effects?</td><td>CER</td><td>Better for dialect spelling variants and clitics; weak for long words</td></tr>
+<tr><td>Bounded comparison across noisy cases?</td><td>MER</td><td>Unaffected by unbounded insertions</td></tr>
+<tr><td>Is it dropping speech?</td><td>Deletion rate D / N</td><td>Critical for compliance, medical, legal; invisible if you only read WER</td></tr>
+<tr><td>Is it looping or inventing?</td><td>Insertion rate I / N; repetition-loop detector (n-gram repeat ratio)</td><td>One loop can dominate WER</td></tr>
+<tr><td>Does it invent text on non-speech?</td><td>Hallucination rate on <code>no_speech</code>/<code>music</code> segments</td><td>Mizan: fraction with &gt; 2 tokens emitted</td></tr>
+<tr><td>Is the Arabic side good, and is the English side good?</td><td>WER-AR, WER-EN (errors attributed by reference token script)</td><td>Insertions have no reference token: attributed by the inserted token's script (documented choice)</td></tr>
+<tr><td>Are English terms kept as English?</td><td>English-term preservation (fuzzy match &ge; 0.8)</td><td>Captures the "ميتنج vs meeting" policy explicitly</td></tr>
+<tr><td>Is it right at the switch points?</td><td>PIER or a switch-point WER (§5.5)</td><td>Overall WER can improve while switch points get worse</td></tr>
+<tr><td>Is the <i>meaning</i> preserved?</td><td>Semantic distance / embedding-based metrics, task-level metrics (§5.7)</td><td>Research-stage; use as a complement, not a replacement</td></tr></table>
+
+<h3>5.3 Aggregation rules (these change decisions)</h3>
+<ul>
+<li><b>Micro-average over words</b> (corpus level), not over segments: a 30-word segment must weigh more than a 2-word one.</li>
+<li><b>Per-stratum values are also corpus-level within the stratum</b> (Mizan: &Sigma;errors / &Sigma;N inside each slice), and the stratum <code>n</code> must be shown so thin slices are not over-read.</li>
+<li><b>Metrics that do not apply to a segment must not contribute</b> (e.g. English-term preservation on a segment with no English; hallucination rate on speech segments). Mizan marks them non-applicable and aggregates only over applicable ones.</li>
+<li><b>Empty references</b> (true silence) have N = 0: every emitted word is an insertion. Do not skip them &mdash; they are exactly where some models fail.</li>
+</ul>
+
+<h3>5.4 Code-switching specific metrics</h3>
+<p>Research on Arabic&ndash;English code-switching (e.g. the Egyptian ArzEn benchmarking study) reports that standard WER/CER fail to capture cross-transcription and orthographic variation, and evaluates MER and WIL alongside them. <span class="tag">verified (abstract-level)</span> A vendor blog reports an example where overall WER improved 1.69 points while switch-point accuracy worsened by 6.17 points <span class="tag">vendor-reported; unverified</span> &mdash; treat as an illustration of the risk, not a measured constant. The defensive practice is to evaluate:</p>
+<ul>
+<li><b>Language-mix strata</b> (<code>ar</code>, <code>en</code>, <code>mixed</code>) &mdash; Mizan derives <code>lang_mix</code> from approved spans;</li>
+<li><b>Script-split WER</b> and <b>English-term preservation</b>;</li>
+<li><b>Switch-point error rate</b>: compute errors only on tokens within &plusmn;k words of a language boundary in the reference (a PIER-style "points of interest" metric).</li></ul>
+
+<h3>5.5 Points-of-interest and entity metrics</h3>
+<p>PIER (Point-of-Interest Error Rate) is a WER variant restricted to words of interest, motivated by the observation that ordinary metrics under-weight the points that matter in code-switched speech by averaging them with the dominant language. <span class="tag">verified</span> The same idea applies to any business-critical token class: <b>numbers and amounts, names, product terms, dates</b>. A practical recipe: tag these tokens in the gold set (or via regex/NER), align, and report an error rate over only those tokens. Decision makers care more about "did it get the amount right" than about filler words.</p>
+
+<h3>5.6 Multiple references and orthographic variants</h3>
+<p>PolyWER (Findings of EMNLP 2024) provides transliterated and translated alternative references so that valid variants are not penalized; earlier multi-reference WER did the same for dialectal Arabic spelling variants. <span class="tag">verified</span> When normalization cannot reasonably collapse the variants (English words in Arabic script; dialect spellings), score against the <i>best-matching</i> reference variant per word/segment, or maintain a project lexicon of accepted variants and apply it in the normalizer.</p>
+
+<h3>5.7 Beyond WER: semantic and task-level evaluation</h3>
+<p>WER treats every word equally and is insensitive to meaning; improving WER does not guarantee better downstream outcomes. Semantic Distance (SemDist) was proposed for downstream NLU tasks such as intent recognition and parsing, H_eval combines semantic distance with a non-keyword error rate, and embedding/LLM-based scoring is an active area with limited validation. <span class="tag">verified (preprints)</span> Recommended stance:</p>
+<ul>
+<li>Keep WER/CER as the reproducible, comparable core. Add semantic or task metrics as a <b>second opinion</b> and validate them against human judgment on a small sample before trusting them.</li>
+<li>If the transcript feeds a downstream system (search, summarization, intent detection, compliance flagging), measure <b>that system's metric</b> on transcripts from each candidate. It is the most decision-relevant number you can produce, and it is cheap once the transcripts exist.</li>
+<li>If an LLM judge is used to grade transcripts, calibrate it (agreement with humans, position and verbosity bias) and never use it as the sole gate.</li></ul>
+
+<h3>5.8 Timing, speaker and format metrics (out of scope for Mizan v1)</h3>
+<p>If word timestamps, diarization or punctuation/casing matter for your use case, evaluate them with their own metrics (timestamp deviation, DER, punctuation F1). Mizan reserves schema fields for diarization but does not evaluate it; do not infer anything about those capabilities from WER.</p>
+
+<h2>6. Statistical rigor: knowing whether a difference is real</h2>
+<h3>6.1 Why intervals are not optional</h3>
+<p>Bisani &amp; Ney's bootstrap paper (ICASSP 2004) asks exactly the question a swap raises: is an observed difference a genuine advantage or an effect of chance? Its finding was that confidence intervals on WER are wide and the large majority of improvements reported in the literature were not much bigger than the standard error. <span class="tag">verified</span> The simulation in §3.2 reproduces the point: at 100 segments a single WER carries about &plusmn;3.5 points.</p>
+
+<h3>6.2 Bootstrap confidence intervals</h3>
+<ol>
+<li>Compute per-segment error counts (S+D+I) and reference length N for each system (these are the sufficient statistics for WER).</li>
+<li>Resample segments with replacement B times (B &ge; 1,000), and for each resample recompute the <b>corpus-level</b> ratio &Sigma;errors / &Sigma;N.</li>
+<li>Take the 2.5th and 97.5th percentiles (percentile interval) &mdash; or a bootstrap-t / BCa interval when the distribution is skewed.</li>
+<li><b>Seed the generator</b> and store the seed so that the interval is reproducible (Mizan seeds per run and metric).</li></ol>
+<div class="box warn"><b class="t">Segments are not independent</b>
+Errors in segments from the same speaker, call or recording are positively correlated (same voice, same noise, same vocabulary). Resampling individual segments then <i>understates</i> uncertainty. Bisani &amp; Ney found sentence-level resampling gives considerably smaller standard errors than speaker-level resampling; a later blockwise-bootstrap paper makes the same point for dependent utterances. <span class="tag">verified</span>
+<b>Default to a cluster (block) bootstrap</b>: resample whole recordings or speakers, then take all their segments. Use segment-level resampling only when each segment comes from a distinct speaker/recording. <i>Mizan's report currently resamples segments; see §13.</i></div>
+
+<h3>6.3 Paired comparison of two systems</h3>
+<p>Because both systems transcribe the same segments, compare them <b>paired</b>:</p>
+<div class="eq">for b in 1..B:
+    draw one resample of segments (or clusters)             # SAME indices for both systems
+    d_b = WER_C(resample) − WER_I(resample)
+CI of the difference = [percentile 2.5, percentile 97.5] of d_b
+superiority:       lower bound of (I − C) > 0
+non-inferiority:   upper bound of (C − I) < δ</div>
+<p>Classical alternatives from speech recognition practice: <b>McNemar's test</b> (counts of segments where exactly one system is correct; appropriate when errors can be treated as independent events, e.g. isolated words) and the <b>matched-pairs sentence-segment word error (MAPSSWE) test</b> (which relaxes independence and suits connected speech) from Gillick &amp; Cox (1989), both implemented in NIST's sclite/SCTK toolkit. <span class="tag">verified</span> The paired bootstrap is simpler to implement with arbitrary metrics and is the recommended default; use MAPSSWE as a cross-check when you want a classical, widely recognized test.</p>
+
+<h3>6.4 Non-inferiority and equivalence for swaps</h3>
+<ul>
+<li><b>Set &delta; first</b>, from the business impact of an error-rate increase (e.g. "agents re-listen when WER &gt; X") and from the human noise floor (§3.3). A margin below the noise floor is unfalsifiable.</li>
+<li><b>Non-inferiority</b> (cost-driven swap): pass if upper95%(WER<sub>C</sub> &minus; WER<sub>I</sub>) &lt; &delta;. This is stricter than "not significantly worse", which a small test set passes trivially &mdash; <i>absence of evidence is not evidence of equivalence</i>.</li>
+<li><b>Equivalence</b> (same model, new engine): two one-sided tests at 5% each, i.e. the <b>90% interval</b> of the difference lies within &plusmn;&delta;.</li>
+<li><b>Apply the criterion per critical slice</b>, not only overall (§7), with a looser &delta; where slices are small.</li></ul>
+
+<h3>6.5 Multiple comparisons and discipline</h3>
+<ul>
+<li>Pre-declare <b>one primary metric</b> (e.g. corpus WER after <code>arabic_v1</code>) and a <b>short list of critical slices</b>. Everything else is exploratory.</li>
+<li>With K candidates, use Holm or Bonferroni adjustments for confirmatory pairwise claims, or rank candidates by interval overlap against the incumbent only.</li>
+<li>Do not tune decoding parameters on the locked test set. A winner chosen as the best of many tuned variants has optimistic bias.</li>
+<li>Repeat stochastic systems (sampling, temperature fallback): run &ge; 3 seeds and report variation; a difference smaller than the run-to-run variation is not a difference.</li></ul>
+
+<h3>6.6 Percentiles and rates need intervals too</h3>
+<p>Latency percentiles, hallucination rate (a proportion on a small number of non-speech segments), error rate in load tests: all are estimates. Use Wilson/Clopper&ndash;Pearson intervals for proportions (a 0/40 hallucination rate is "&le; 8.8% at 95% confidence", not "zero") and bootstrap intervals for percentiles. State the sample size next to every figure.</p>
